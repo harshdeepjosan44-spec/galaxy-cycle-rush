@@ -1,0 +1,606 @@
+/**
+ * Galaxy Cycle Rush — React Native (Expo) Version
+ * 
+ * Adapted from web JSX version.
+ * Uses React Native's View/Text/TouchableOpacity instead of HTML divs.
+ * SVG via react-native-svg.
+ * Storage via @react-native-async-storage/async-storage.
+ * Haptic feedback via expo-haptics.
+ */
+
+import React, {
+  useState, useEffect, useRef, useCallback
+} from 'react';
+import {
+  View, Text, TouchableOpacity, StyleSheet, Dimensions,
+  Animated, Easing, Platform, Vibration
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
+import Svg, {
+  Circle, Line, Ellipse, Path, Polygon, Rect, G
+} from 'react-native-svg';
+
+// ─── SCREEN DIMENSIONS ──────────────────────────────────────
+const { width: SW, height: SH } = Dimensions.get('window');
+// Force landscape orientation values
+const VW = Math.max(SW, SH);
+const VH = Math.min(SW, SH);
+
+// ─── PHYSICS CONSTANTS ──────────────────────────────────────
+const FLOOR_Y  = VH * 0.76;
+const BIKE_H   = VH * 0.24;
+const BIKE_W   = VW * 0.28;
+const BIKE_SCX = VW * 0.22;  // bike screen-x target
+const GRAVITY  = 0.55;
+const JUMP_VY  = -(VH * 0.042);
+const JUMP_HOLD= -0.16;
+const JUMP_CUT = 0.38;
+const COYOTE_F = 7;
+const BASE_V   = VW * 0.012;
+const CAM_LAG  = 0.11;
+const TRAIL_LEN= 18;
+
+// ─── DATA ───────────────────────────────────────────────────
+const PLANETS = [
+  { name:'Mercury',  col:['#c8c8c8','#888','#ddd'],   grav:1.0,  spd:1.00, den:1.0, gc:'#4a3828', st:'#0d0600', sb:'#2e1800' },
+  { name:'Venus',    col:['#e8c97e','#c8922a','#f5e6b0'],grav:1.0,spd:1.18,den:1.3, gc:'#6b3c00', st:'#120600', sb:'#3a1400' },
+  { name:'Earth',    col:['#4fa3e0','#2d7d46','#7ab8f5'],grav:1.0,spd:1.38,den:1.6, gc:'#0d4020', st:'#001020', sb:'#00254a' },
+  { name:'Mars',     col:['#c1440e','#8b2500','#e06030'],grav:0.6,spd:1.60,den:1.9, gc:'#551800', st:'#110200', sb:'#300a00' },
+  { name:'Jupiter',  col:['#c88b3a','#a0522d','#e8b870'],grav:2.2,spd:1.85,den:2.2, gc:'#3f2008', st:'#090400', sb:'#200c00' },
+  { name:'Saturn',   col:['#e4d191','#b8a050','#f5eab0'],grav:1.0,spd:2.10,den:2.4, gc:'#3e3108', st:'#070600', sb:'#141000' },
+  { name:'Uranus',   col:['#7de8e8','#4aabab','#aff0f0'],grav:0.9,spd:2.40,den:2.7, gc:'#003838', st:'#000c0c', sb:'#002020' },
+  { name:'Neptune',  col:['#3f54ba','#1a2d8a','#6070d8'],grav:1.1,spd:2.75,den:2.9, gc:'#000a38', st:'#00000a', sb:'#00051e' },
+  { name:'∞ VOID',   col:['#9b00ff','#2a0050','#ff00ff'],grav:1.5,spd:3.20,den:3.2, gc:'#0e0020', st:'#000000', sb:'#08001a' },
+];
+
+const RIDERS = [
+  { name:'Cosmo',  fc:'#00ccff', wc:'#0077bb', rc:'#88ddff', gc:'#00eeff' },
+  { name:'Nebula', fc:'#ff33cc', wc:'#990088', rc:'#ffaae8', gc:'#ff55ee' },
+  { name:'Orion',  fc:'#ffcc00', wc:'#bb8800', rc:'#ffeeaa', gc:'#ffdd00' },
+  { name:'Vega',   fc:'#00ff88', wc:'#009944', rc:'#99ffcc', gc:'#44ffaa' },
+];
+
+const rnd = (a, b) => Math.random() * (b - a) + a;
+
+const storage = {
+  get: async (k, d) => {
+    try { const v = await AsyncStorage.getItem(k); return v ? JSON.parse(v) : d; }
+    catch { return d; }
+  },
+  set: async (k, v) => {
+    try { await AsyncStorage.setItem(k, JSON.stringify(v)); } catch {}
+  },
+};
+
+// ─── BICYCLE SVG (React Native SVG version) ─────────────────
+function BikeSVG({ C, pedal, lean = 0, susp = 0, air = false, shield = false }) {
+  const { fc, wc, rc, gc } = C;
+  const W = BIKE_W, H = BIKE_H;
+  // Scale factors (viewBox 120x80 → actual dimensions)
+  const sx = W / 120, sy = H / 80;
+  const s = (x) => x * sx;
+  const t = (y) => y * sy + susp * sy;
+
+  const WR = s(22), SPK = 8;
+  const RWx = s(30), RWy = t(58);
+  const FWx = s(94), FWy = t(58);
+  const BBx = s(60), BBy = t(50);
+  const STx = s(50), STy = t(28);
+  const HTx = s(86), HTy = t(30);
+  const CL  = s(12);
+
+  const p1x = BBx + CL * Math.cos(pedal),    p1y = BBy + CL * Math.sin(pedal);
+  const p2x = BBx + CL * Math.cos(pedal+Math.PI), p2y = BBy + CL * Math.sin(pedal+Math.PI);
+
+  const ta = lean * 0.45;
+  const hipX = STx+s(1), hipY = STy+s(6);
+  const shX  = hipX + s(20)*Math.sin(ta-0.22), shY = hipY - s(20)*Math.cos(ta-0.22);
+  const hdX  = shX + s(5)*Math.sin(ta-0.08),   hdY = shY - s(9);
+  const grX  = HTx+s(5), grY = HTy-s(10);
+  const elX  = (shX+grX)*.5+s(2), elY = (shY+grY)*.5+s(5);
+  const TL   = s(14);
+  const rkA  = pedal-0.3, rKx=hipX+TL*Math.sin(rkA), rKy=hipY+TL*Math.cos(rkA);
+  const lkA  = pedal+Math.PI-0.3, lKx=hipX+TL*Math.sin(lkA), lKy=hipY+TL*Math.cos(lkA);
+
+  const spokes = Array.from({length: SPK}, (_, i) => {
+    const a0 = (pedal * 1.55) + i / SPK * Math.PI * 2;
+    const a1 = (pedal * 1.30) + i / SPK * Math.PI * 2;
+    return { i, a0, a1 };
+  });
+
+  return (
+    <Svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} overflow="visible">
+      {/* Wheels */}
+      {[[RWx,RWy],[FWx,FWy]].map(([cx,cy],wi)=>(
+        <G key={wi}>
+          <Circle cx={cx} cy={cy} r={WR+s(2)} fill="none" stroke="#111" strokeWidth={s(4.5)}/>
+          <Circle cx={cx} cy={cy} r={WR} fill="none" stroke={wc} strokeWidth={s(3.5)} opacity={0.95}/>
+          {spokes.map(({i,a0,a1})=>{
+            const a = wi===0?a0:a1;
+            return <Line key={i} x1={cx} y1={cy} x2={cx+(WR-s(4))*Math.cos(a)} y2={cy+(WR-s(4))*Math.sin(a)} stroke={wc} strokeWidth={s(1.2)} opacity={0.55}/>;
+          })}
+          <Circle cx={cx} cy={cy} r={s(4)} fill={wc}/>
+          <Circle cx={cx} cy={cy} r={s(2)} fill="#111"/>
+        </G>
+      ))}
+      {/* Frame */}
+      <Line x1={STx} y1={STy} x2={BBx} y2={BBy} stroke={fc} strokeWidth={s(3.5)} strokeLinecap="round"/>
+      <Line x1={STx} y1={STy} x2={HTx} y2={HTy} stroke={fc} strokeWidth={s(3.5)} strokeLinecap="round"/>
+      <Line x1={HTx} y1={HTy} x2={BBx} y2={BBy} stroke={fc} strokeWidth={s(3.5)} strokeLinecap="round"/>
+      <Line x1={HTx} y1={HTy} x2={FWx} y2={FWy} stroke={fc} strokeWidth={s(3)} strokeLinecap="round"/>
+      <Line x1={STx} y1={STy} x2={RWx} y2={RWy} stroke={fc} strokeWidth={s(2.8)} strokeLinecap="round"/>
+      <Line x1={BBx} y1={BBy} x2={RWx} y2={RWy} stroke={fc} strokeWidth={s(3.2)} strokeLinecap="round"/>
+      {/* Handlebar */}
+      <Line x1={HTx} y1={HTy} x2={HTx} y2={HTy-s(11)} stroke={fc} strokeWidth={s(2.8)} strokeLinecap="round"/>
+      <Line x1={HTx-s(5)} y1={HTy-s(11)} x2={HTx+s(9)} y2={HTy-s(9)} stroke={fc} strokeWidth={s(2.5)} strokeLinecap="round"/>
+      {/* Saddle */}
+      <Ellipse cx={STx} cy={STy-s(11)} rx={s(9)} ry={s(3)} fill={fc}/>
+      {/* Crank */}
+      <Circle cx={BBx} cy={BBy} r={s(5)} fill={fc}/>
+      <Line x1={BBx} y1={BBy} x2={p1x} y2={p1y} stroke={fc} strokeWidth={s(3)} strokeLinecap="round"/>
+      <Line x1={BBx} y1={BBy} x2={p2x} y2={p2y} stroke={fc} strokeWidth={s(3)} strokeLinecap="round"/>
+      {/* Legs (right) */}
+      <Line x1={hipX} y1={hipY} x2={rKx} y2={rKy} stroke={rc} strokeWidth={s(4.5)} strokeLinecap="round"/>
+      <Line x1={rKx}  y1={rKy}  x2={p1x} y2={p1y} stroke={rc} strokeWidth={s(4)}   strokeLinecap="round"/>
+      {/* Torso + head */}
+      <Line x1={hipX} y1={hipY} x2={shX} y2={shY} stroke={rc} strokeWidth={s(5)} strokeLinecap="round"/>
+      <Line x1={shX}  y1={shY}  x2={elX} y2={elY} stroke={rc} strokeWidth={s(3.8)} strokeLinecap="round"/>
+      <Line x1={elX}  y1={elY}  x2={grX} y2={grY} stroke={rc} strokeWidth={s(3.5)} strokeLinecap="round"/>
+      <Circle cx={hdX} cy={hdY} r={s(7)} fill={rc}/>
+      <Path d={`M${hdX-s(7)} ${hdY+s(1)}Q${hdX-s(5)} ${hdY-s(13)}${hdX} ${hdY-s(14)}Q${hdX+s(5)} ${hdY-s(13)}${hdX+s(7)} ${hdY+s(1)}`} fill={fc} opacity={0.9}/>
+      <Ellipse cx={hdX+s(4)} cy={hdY} rx={s(3.2)} ry={s(2.2)} fill="#0a0a22" stroke={fc} strokeWidth={s(.9)}/>
+      {/* Shield */}
+      {shield && <Circle cx={BBx} cy={BBy} r={s(55)} fill="none" stroke={gc} strokeWidth={s(2.5)} opacity={0.6}/>}
+      {/* Air shadow */}
+      {air && <>
+        <Ellipse cx={RWx} cy={RWy+WR+s(5)} rx={s(9)} ry={s(2)} fill={gc} opacity={0.15}/>
+        <Ellipse cx={FWx} cy={FWy+WR+s(5)} rx={s(9)} ry={s(2)} fill={gc} opacity={0.15}/>
+      </>}
+    </Svg>
+  );
+}
+
+// ─── MAIN GAME COMPONENT ─────────────────────────────────────
+export default function GalaxyCycleRush() {
+  const [screen,  setScreen]  = useState('menu');
+  const [riderId, setRiderId] = useState(0);
+  const [stats,   setStats]   = useState({ hi:0, games:0, coins:0, maxPlanet:0, maxCombo:0 });
+
+  // Render state
+  const [bikeX,   setBikeX]   = useState(BIKE_SCX);
+  const [bikeY,   setBikeY]   = useState(FLOOR_Y);
+  const [pedA,    setPedA]     = useState(0);
+  const [leanA,   setLeanA]    = useState(0);
+  const [suspOff, setSuspOff]  = useState(0);
+  const [air,     setAir]      = useState(false);
+  const [score,   setScore]    = useState(0);
+  const [lives,   setLives]    = useState(3);
+  const [combo,   setCombo]    = useState(0);
+  const [planet,  setPlanet]   = useState(0);
+  const [prog,    setProg]     = useState(0);
+  const [obsD,    setObsD]     = useState([]);
+  const [coinsD,  setCoinsD]   = useState([]);
+  const [partD,   setPartD]    = useState([]);
+  const [abilRdy, setAbilRdy]  = useState(true);
+  const [abilCd,  setAbilCd]   = useState(0);
+  const [activeEf,setActiveEf] = useState([]);
+
+  // Engine refs
+  const bike    = useRef({ wx:0, wy:FLOOR_Y, vx:0, vy:0, coyote:0, canJump:true });
+  const camX    = useRef(0);
+  const pedalR  = useRef(0);
+  const leanR   = useRef(0.16);
+  const suspR   = useRef({ y:0, vy:0 });
+  const effR    = useRef({});
+  const obsR    = useRef([]);
+  const coinsR  = useRef([]);
+  const pupsR   = useRef([]);
+  const partR   = useRef([]);
+  const frameR  = useRef(null);
+  const tickR   = useRef(0);
+  const scoreR  = useRef(0);
+  const livesR  = useRef(3);
+  const comboR  = useRef(0);
+  const maxCR   = useRef(0);
+  const coinsEr = useRef(0);
+  const pIdxR   = useRef(0);
+  const pProgR  = useRef(0);
+  const abilTR  = useRef(0);
+  const hitFlR  = useRef(0);
+  const holdJmp = useRef(false);
+
+  const C  = RIDERS[riderId];
+  const PD = PLANETS[planet];
+
+  // Load stats on mount
+  useEffect(() => {
+    storage.get('gcr_native', { hi:0, games:0, coins:0, maxPlanet:0, maxCombo:0 })
+      .then(s => setStats(s));
+  }, []);
+
+  // Jump
+  const jump = useCallback(() => {
+    const b = bike.current;
+    if (b.canJump || b.coyote > 0) {
+      b.vy = JUMP_VY; b.canJump = false; b.coyote = 0;
+      holdJmp.current = true;
+      if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+  }, []);
+
+  const jumpUp = useCallback(() => {
+    holdJmp.current = false;
+    if (bike.current.vy < 0) bike.current.vy *= JUMP_CUT;
+  }, []);
+
+  // Start game
+  const startGame = useCallback(() => {
+    bike.current = { wx: 200, wy: FLOOR_Y, vx: 0, vy: 0, coyote: 0, canJump: true };
+    camX.current = 200 - BIKE_SCX;
+    pedalR.current = 0; leanR.current = 0.16; suspR.current = { y:0, vy:0 };
+    effR.current = {}; obsR.current = []; coinsR.current = []; pupsR.current = [];
+    partR.current = []; tickR.current = 0; scoreR.current = 0; livesR.current = 3;
+    comboR.current = 0; maxCR.current = 0; coinsEr.current = 0;
+    pIdxR.current = 0; pProgR.current = 0; abilTR.current = 0; hitFlR.current = 0;
+    holdJmp.current = false;
+    setBikeX(BIKE_SCX); setBikeY(FLOOR_Y); setScore(0); setLives(3);
+    setCombo(0); setPlanet(0); setProg(0);
+    setObsD([]); setCoinsD([]); setPartD([]);
+    setAbilRdy(true); setAbilCd(0); setActiveEf([]);
+    setScreen('game');
+  }, []);
+
+  // Game loop
+  useEffect(() => {
+    if (screen !== 'game') { cancelAnimationFrame(frameR.current); return; }
+
+    const loop = () => {
+      tickR.current++;
+      const T = tickR.current, now = Date.now();
+      const b = bike.current, e = effR.current;
+      const pd = PLANETS[pIdxR.current];
+
+      for (const k in e) if (e[k] < now) delete e[k];
+
+      const wspd = BASE_V * pd.spd * (e.turbo ? 2.1 : 1);
+      const grv  = GRAVITY * pd.grav;
+
+      // Forward movement
+      b.wx += wspd;
+
+      // Vertical physics
+      b.vy += grv;
+      if (holdJmp.current && b.vy < 0) b.vy += JUMP_HOLD;
+      b.wy += b.vy;
+
+      const wasGround = b.wy >= FLOOR_Y - 1;
+      if (b.wy >= FLOOR_Y) {
+        const wasAir = !wasGround;
+        b.wy = FLOOR_Y; b.vy = 0;
+        b.canJump = true; b.coyote = COYOTE_F;
+        if (wasAir && Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      } else {
+        if (b.coyote > 0) b.coyote--; else b.canJump = false;
+      }
+
+      // Camera
+      const camTarget = b.wx - BIKE_SCX;
+      camX.current += (camTarget - camX.current) * (1 - CAM_LAG);
+      setBikeX(b.wx - camX.current);
+      setBikeY(b.wy);
+      setAir(b.wy < FLOOR_Y - 2);
+
+      // Suspension
+      const s = suspR.current;
+      if (b.wy >= FLOOR_Y - 2) {
+        s.vy += -s.y * 0.44 - s.vy * 0.65;
+        s.y  += s.vy;
+        s.vy += Math.sin(T * 0.58) * 0.07 * wspd;
+        if (T % 36 === 0) s.vy -= 0.5 * wspd;
+      } else { s.y *= 0.8; s.vy *= 0.65; }
+      setSuspOff(-Math.abs(s.y) * 0.75);
+
+      // Pedal + lean
+      pedalR.current -= 0.13 * wspd * (b.wy < FLOOR_Y - 2 ? 0.18 : 1);
+      setPedA(pedalR.current);
+      const tgLean = b.wy < FLOOR_Y - 2 ? -0.28 : 0.16;
+      leanR.current += (tgLean - leanR.current) * 0.1;
+      setLeanA(leanR.current);
+
+      // Obstacles
+      const oInt = Math.max(40, Math.floor(110 / pd.den) - pIdxR.current * 3);
+      const oArr = obsR.current.filter(o => o.wx - camX.current > -80);
+      if (T % oInt === 0) {
+        const sz = rnd(34, 46 + pIdxR.current * 1.5) | 0;
+        oArr.push({
+          id: T, wx: b.wx + VW * 1.1,
+          sy: FLOOR_Y - sz, w: sz, h: sz,
+          col: `hsl(${(Math.random()*360)|0},76%,62%)`,
+        });
+      }
+      obsR.current = oArr;
+      setObsD(oArr.map(o => ({ ...o, sx: o.wx - camX.current })));
+
+      // Coins
+      const cArr = coinsR.current.filter(c => c.wx - camX.current > -30 && !c.hit);
+      if (T % 65 === 0) {
+        const h = Math.random() < 0.45 ? FLOOR_Y - 36 : FLOOR_Y - rnd(80, 175);
+        cArr.push({ id: T, wx: b.wx + VW * 1.05, sy: h, hit: false });
+      }
+      coinsR.current = cArr;
+      setCoinsD(cArr.map(c => ({ ...c, sx: c.wx - camX.current })));
+
+      // Collision - obstacles
+      const bx1 = b.wx - 5, bx2 = b.wx + 85, by1 = b.wy - 76, by2 = b.wy;
+      if (!e.shield) {
+        for (const o of oArr) {
+          if (bx1 < o.wx + o.w && bx2 > o.wx && by1 < o.sy + o.h && by2 > o.sy) {
+            obsR.current = []; comboR.current = 0; setCombo(0);
+            livesR.current--;
+            setLives(livesR.current);
+            if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+            if (livesR.current <= 0) {
+              cancelAnimationFrame(frameR.current);
+              setScreen('over'); return;
+            }
+            break;
+          }
+        }
+      }
+
+      // Collision - coins
+      for (const c of cArr) {
+        if (!c.hit && Math.abs(b.wx - c.wx) < 32 && Math.abs(b.wy - 28 - c.sy) < 32) {
+          c.hit = true;
+          comboR.current++;
+          if (comboR.current > maxCR.current) maxCR.current = comboR.current;
+          setCombo(comboR.current);
+          const val = Math.ceil(10 * (1 + comboR.current * 0.12) * (e.x2 ? 2 : 1));
+          scoreR.current += val; coinsEr.current++;
+        }
+      }
+
+      scoreR.current++; setScore(scoreR.current);
+
+      // Planet progress
+      pProgR.current += 0.058 * pd.spd; setProg(pProgR.current % 100);
+      if (pProgR.current >= 100) {
+        pProgR.current = 0;
+        if (pIdxR.current < PLANETS.length - 1) {
+          pIdxR.current++; setPlanet(pIdxR.current);
+          scoreR.current += pIdxR.current * 600;
+        }
+      }
+
+      setActiveEf(Object.keys(e).filter(k => e[k] > now));
+      frameR.current = requestAnimationFrame(loop);
+    };
+
+    frameR.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(frameR.current);
+  }, [screen]);
+
+  // Save on game over
+  useEffect(() => {
+    if (screen !== 'over') return;
+    const s = scoreR.current;
+    setStats(prev => {
+      const n = {
+        ...prev,
+        hi: Math.max(prev.hi, s),
+        games: prev.games + 1,
+        coins: prev.coins + coinsEr.current,
+        maxPlanet: Math.max(prev.maxPlanet, pIdxR.current),
+        maxCombo: Math.max(prev.maxCombo, maxCR.current),
+      };
+      storage.set('gcr_native', n);
+      return n;
+    });
+  }, [screen]);
+
+  // ── RENDER ─────────────────────────────────────────────────
+  const bikeLeft = bikeX - (BIKE_W * 0.3);
+  const bikeTop  = bikeY - BIKE_H + suspOff;
+
+  if (screen === 'menu') return (
+    <LinearGradient colors={[PD.st, PD.sb]} style={styles.fullScreen}>
+      <View style={styles.menuContainer}>
+        <Text style={[styles.title, { color: PD.col[0] }]}>🌌 GALAXY CYCLE RUSH</Text>
+        <Text style={styles.subtitle}>Real Physics · 9 Planets · Forward Track</Text>
+        {stats.hi > 0 && <Text style={styles.hiscore}>🏆 BEST: {stats.hi.toLocaleString()}</Text>}
+        <TouchableOpacity style={[styles.bigBtn, { backgroundColor: PD.col[0] }]} onPress={() => setScreen('select')}>
+          <Text style={styles.bigBtnText}>🚴 START RIDING</Text>
+        </TouchableOpacity>
+        <View style={styles.statsRow}>
+          {[{ v:stats.games, l:'Games' }, { v:stats.coins, l:'Coins' }].map(s => (
+            <View key={s.l} style={styles.statBox}>
+              <Text style={styles.statVal}>{s.v.toLocaleString()}</Text>
+              <Text style={styles.statLbl}>{s.l}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+    </LinearGradient>
+  );
+
+  if (screen === 'select') return (
+    <LinearGradient colors={['#000010','#050020']} style={styles.fullScreen}>
+      <View style={styles.menuContainer}>
+        <Text style={styles.title}>CHOOSE RIDER</Text>
+        <View style={styles.riderGrid}>
+          {RIDERS.map((r, i) => (
+            <TouchableOpacity key={i} onPress={() => setRiderId(i)}
+              style={[styles.riderCard, { borderColor: riderId===i?r.fc:'#333', backgroundColor: riderId===i?r.fc+'22':'#111' }]}>
+              <Text style={[styles.riderName, { color: r.fc }]}>{r.name}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <TouchableOpacity style={[styles.bigBtn, { backgroundColor: C.fc }]} onPress={startGame}>
+          <Text style={styles.bigBtnText}>🚴 RIDE AS {C.name.toUpperCase()}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => setScreen('menu')}>
+          <Text style={styles.backBtn}>← BACK</Text>
+        </TouchableOpacity>
+      </View>
+    </LinearGradient>
+  );
+
+  if (screen === 'game') return (
+    <LinearGradient colors={[PD.st, PD.sb]} style={styles.fullScreen}>
+      {/* HUD */}
+      <View style={styles.hud}>
+        <View>
+          <Text style={styles.hudLabel}>SCORE</Text>
+          <Text style={[styles.hudScore, { color: C.gc }]}>{score.toLocaleString()}</Text>
+          {combo > 1 && <Text style={styles.combo}>×{combo} COMBO!</Text>}
+        </View>
+        <View style={styles.planetOrb}>
+          <Text style={styles.planetName}>{PD.name.slice(0,3)}</Text>
+          <View style={styles.progBar}>
+            <View style={[styles.progFill, { width: `${prog % 100}%`, backgroundColor: PD.col[0] }]}/>
+          </View>
+        </View>
+        <View>
+          <Text style={styles.lives}>{'❤️'.repeat(lives)}</Text>
+          {stats.hi > 0 && <Text style={styles.hiLabel}>HI:{stats.hi.toLocaleString()}</Text>}
+        </View>
+      </View>
+
+      {/* GAME CANVAS */}
+      <View style={styles.canvas}>
+        {/* Ground */}
+        <View style={[styles.ground, { top: FLOOR_Y, backgroundColor: PD.gc }]}/>
+
+        {/* Coins */}
+        {coinsD.filter(c => !c.hit).map(c => (
+          <Text key={c.id} style={[styles.coin, { left: c.sx - 12, top: c.sy - 12 }]}>🪙</Text>
+        ))}
+
+        {/* Obstacles */}
+        {obsD.map((o, i) => (
+          <View key={i} style={[styles.obstacle, { left: o.sx, top: o.sy, width: o.w, height: o.h, borderColor: o.col, backgroundColor: o.col + '44' }]}/>
+        ))}
+
+        {/* BIKE */}
+        <View style={[styles.bike, { left: bikeLeft, top: bikeTop }]}>
+          <BikeSVG C={C} pedal={pedA} lean={leanA} air={air} shield={!!effR.current.shield}/>
+        </View>
+
+        {/* Jump / Pause buttons */}
+        <TouchableOpacity style={styles.pauseBtn}
+          onPress={() => { cancelAnimationFrame(frameR.current); setScreen('pause'); }}>
+          <Text style={styles.pauseText}>⏸</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* CONTROLS */}
+      <View style={styles.controls}>
+        <TouchableOpacity style={[styles.jumpBtn, { borderColor: C.fc, backgroundColor: C.fc + '33' }]}
+          onPressIn={jump} onPressOut={jumpUp} activeOpacity={0.8}>
+          <Text style={styles.jumpIcon}>🚴</Text>
+          <Text style={[styles.jumpLabel, { color: C.fc }]}>JUMP</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.abilBtn, { borderColor: abilRdy ? C.fc + '77' : '#333', opacity: abilRdy ? 1 : 0.5 }]}
+          onPress={() => {}} disabled={!abilRdy}>
+          <Text style={styles.abilIcon}>{abilRdy ? '✨' : abilCd}</Text>
+          <Text style={[styles.abilLabel, { color: abilRdy ? C.fc : '#555' }]}>{abilRdy ? 'ABILITY' : 'CHARGE'}</Text>
+        </TouchableOpacity>
+      </View>
+    </LinearGradient>
+  );
+
+  if (screen === 'pause') return (
+    <LinearGradient colors={['#000010','#050020']} style={styles.fullScreen}>
+      <View style={styles.menuContainer}>
+        <Text style={styles.title}>⏸ PAUSED</Text>
+        <Text style={styles.subtitle}>{score.toLocaleString()} pts · {PD.name}</Text>
+        <TouchableOpacity style={[styles.bigBtn, { backgroundColor: C.fc }]} onPress={() => setScreen('game')}>
+          <Text style={styles.bigBtnText}>▶ RESUME</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => setScreen('menu')}>
+          <Text style={styles.secondaryText}>🏠 QUIT</Text>
+        </TouchableOpacity>
+      </View>
+    </LinearGradient>
+  );
+
+  return (
+    <LinearGradient colors={['#000010','#050020']} style={styles.fullScreen}>
+      <View style={styles.menuContainer}>
+        <Text style={styles.crashEmoji}>💥</Text>
+        <Text style={[styles.title, { color: '#ff3333' }]}>CRASHED!</Text>
+        <Text style={styles.subtitle}>On {PLANETS[planet].name}</Text>
+        <View style={styles.resultsBox}>
+          {[
+            { l:'Score',    v: score.toLocaleString(),    c: C.gc  },
+            { l:'Best',     v: stats.hi.toLocaleString(), c:'#ffe066' },
+            { l:'Combo',    v: `×${Math.max(...[0])}`,   c:'#ff88ff' },
+          ].map(it => (
+            <View key={it.l} style={styles.resultRow}>
+              <Text style={styles.resultLabel}>{it.l}</Text>
+              <Text style={[styles.resultVal, { color: it.c }]}>{it.v}</Text>
+            </View>
+          ))}
+        </View>
+        <TouchableOpacity style={[styles.bigBtn, { backgroundColor: C.fc }]} onPress={startGame}>
+          <Text style={styles.bigBtnText}>🔄 RETRY</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.secondaryBtn} onPress={() => setScreen('menu')}>
+          <Text style={styles.secondaryText}>MENU</Text>
+        </TouchableOpacity>
+      </View>
+    </LinearGradient>
+  );
+}
+
+// ─── STYLES ──────────────────────────────────────────────────
+const styles = StyleSheet.create({
+  fullScreen:     { flex:1, width:'100%', height:'100%' },
+  menuContainer:  { flex:1, alignItems:'center', justifyContent:'center', padding:20 },
+  title:          { fontSize:26, fontWeight:'900', color:'#fff', textAlign:'center', letterSpacing:2, marginBottom:6 },
+  subtitle:       { fontSize:10, color:'#888', letterSpacing:3, marginBottom:14, textAlign:'center' },
+  hiscore:        { fontSize:13, color:'#ffe066', fontWeight:'700', marginBottom:14 },
+  bigBtn:         { paddingVertical:14, paddingHorizontal:40, borderRadius:14, marginBottom:12, minWidth:220 },
+  bigBtnText:     { fontSize:16, fontWeight:'900', color:'#000', textAlign:'center', letterSpacing:2 },
+  secondaryBtn:   { padding:12, borderRadius:10, borderWidth:1, borderColor:'rgba(255,255,255,0.2)', marginTop:6, minWidth:160 },
+  secondaryText:  { color:'#aaa', textAlign:'center', fontSize:12 },
+  statsRow:       { flexDirection:'row', gap:16, marginTop:12 },
+  statBox:        { alignItems:'center', backgroundColor:'rgba(255,255,255,0.05)', borderRadius:10, padding:10, minWidth:70 },
+  statVal:        { color:'#fff', fontSize:16, fontWeight:'700' },
+  statLbl:        { color:'#555', fontSize:8, letterSpacing:2, marginTop:2 },
+  riderGrid:      { flexDirection:'row', flexWrap:'wrap', gap:10, justifyContent:'center', marginBottom:16 },
+  riderCard:      { padding:16, borderRadius:12, borderWidth:2, minWidth:90, alignItems:'center' },
+  riderName:      { fontSize:14, fontWeight:'700' },
+  backBtn:        { color:'#777', fontSize:12, marginTop:12, padding:8 },
+  hud:            { flexDirection:'row', justifyContent:'space-between', alignItems:'flex-start', paddingHorizontal:16, paddingTop:8, paddingBottom:4 },
+  hudLabel:       { fontSize:8, color:'#666', letterSpacing:2 },
+  hudScore:       { fontSize:22, fontWeight:'900', lineHeight:26 },
+  combo:          { fontSize:9, color:'#ffe066', marginTop:1 },
+  planetOrb:      { alignItems:'center' },
+  planetName:     { fontSize:7, color:'rgba(255,255,255,0.9)', fontWeight:'700' },
+  progBar:        { width:40, height:3, backgroundColor:'rgba(255,255,255,0.1)', borderRadius:2, marginTop:3, overflow:'hidden' },
+  progFill:       { height:'100%', borderRadius:2 },
+  lives:          { fontSize:16, textAlign:'right' },
+  hiLabel:        { fontSize:7, color:'#555', textAlign:'right', marginTop:1 },
+  canvas:         { flex:1, overflow:'hidden', position:'relative' },
+  ground:         { position:'absolute', left:0, right:0, bottom:0, opacity:0.9 },
+  coin:           { position:'absolute', fontSize:16 },
+  obstacle:       { position:'absolute', borderRadius:6, borderWidth:2 },
+  bike:           { position:'absolute', zIndex:6 },
+  pauseBtn:       { position:'absolute', top:8, right:8, backgroundColor:'rgba(0,0,0,0.6)', borderRadius:8, padding:6, borderWidth:1, borderColor:'rgba(255,255,255,0.2)' },
+  pauseText:      { color:'#fff', fontSize:13 },
+  controls:       { flexDirection:'row', gap:10, padding:8, paddingHorizontal:14 },
+  jumpBtn:        { flex:3, height:58, borderRadius:14, borderWidth:2.5, alignItems:'center', justifyContent:'center' },
+  jumpIcon:       { fontSize:18 },
+  jumpLabel:      { fontSize:12, fontWeight:'700', letterSpacing:1, marginTop:2 },
+  abilBtn:        { flex:1.5, height:58, borderRadius:14, borderWidth:2, alignItems:'center', justifyContent:'center' },
+  abilIcon:       { fontSize:18 },
+  abilLabel:      { fontSize:8, marginTop:2 },
+  crashEmoji:     { fontSize:44, marginBottom:8 },
+  resultsBox:     { backgroundColor:'rgba(255,255,255,0.05)', borderRadius:13, padding:14, width:'100%', marginBottom:14 },
+  resultRow:      { flexDirection:'row', justifyContent:'space-between', paddingVertical:5, borderBottomWidth:1, borderBottomColor:'rgba(255,255,255,0.05)' },
+  resultLabel:    { fontSize:10, color:'#aaa' },
+  resultVal:      { fontSize:13, fontWeight:'700' },
+});
